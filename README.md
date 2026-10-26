@@ -236,3 +236,4 @@ Nx 23.2.1 orchestrates `nx build web`, `nx lint web`, `nx typecheck web` and `nx
 - [dotnet-hotel](https://github.com/joshbarros/dotnet-hotel): hotel room-nights.
 - [dotnet-tickets](https://github.com/joshbarros/dotnet-tickets): event ticket tiers and orders.
 - [dotnet-carbon](https://github.com/joshbarros/dotnet-carbon): carbon credit batches and purchases.
+- [dotnet-promo](https://github.com/joshbarros/dotnet-promo): limited-use promo codes and redemptions.
