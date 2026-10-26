@@ -15,6 +15,7 @@ export type ReservationStatus = 'Requested' | 'Held' | 'Booked' | 'Cancelled' | 
 export interface Reservation {
   id: string;
   connectorCode: string;
+  ownerId: string;
   reference: string;
   slots: number;
   totalCents: number;
@@ -31,4 +32,16 @@ export interface LogEntry {
   type: string;
   module: string;
   occurredAt: string;
+}
+
+export interface UserInfo {
+  id: string;
+  email: string;
+  roles: string[];
+}
+
+export interface AuthResponse {
+  accessToken: string;
+  expiresAt: string;
+  user: UserInfo;
 }

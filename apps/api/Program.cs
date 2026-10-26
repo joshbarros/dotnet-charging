@@ -1,59 +1,76 @@
-using Charging.Api.Data;
-using Charging.Api.Messaging;
-using Charging.Api.Middleware;
-using Charging.Api.Modules.Reservations;
-using Charging.Api.Modules.Connectors;
-using Charging.Api.Modules.Tokens;
-using Microsoft.EntityFrameworkCore;
+using Charging.Reservations;
+using Charging.Connectors;
+using Charging.Tokens;
+using Charging.Identity;
+using Charging.Shared;
+using Charging.Shared.Auth;
+using Charging.Shared.Http;
+using Charging.Shared.Messaging;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.HttpOverrides;
 using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
+var config = builder.Configuration;
 
-builder.Services.AddControllers().AddJsonOptions(o => o.JsonSerializerOptions.PropertyNameCaseInsensitive = true);
+if (config.GetValue("Logging:Json", false))
+    builder.Logging.AddJsonConsole(o =>
+    {
+        o.IncludeScopes = true;
+        o.UseUtcTimestamp = true;
+    });
+
+builder.Services.AddControllers()
+    .AddJsonOptions(o => o.JsonSerializerOptions.PropertyNameCaseInsensitive = true)
+    .AddApplicationPart(typeof(IdentityModule).Assembly)
+    .AddApplicationPart(typeof(ReservationsModule).Assembly)
+    .AddApplicationPart(typeof(ConnectorsModule).Assembly)
+    .AddApplicationPart(typeof(TokensModule).Assembly);
 builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi();
+builder.Services.AddChargingAuthorization();
 
-var connectionString = builder.Configuration.GetConnectionString("Charging")
-    ?? throw new InvalidOperationException("Connection string 'Charging' is not configured.");
-builder.Services.AddDbContext<ChargingDbContext>(options => options.UseNpgsql(connectionString));
+builder.Services.AddIdentityModule(config);
+var messaging = builder.Services.AddMessaging(config);
+builder.Services.AddReservationsModule(config, messaging);
+builder.Services.AddConnectorsModule(config, messaging);
+builder.Services.AddTokensModule(config, messaging);
+messaging.Start();
 
-builder.Services.Configure<RabbitOptions>(builder.Configuration.GetSection("RabbitMq"));
-builder.Services.Configure<KafkaOptions>(builder.Configuration.GetSection("Kafka"));
-builder.Services.Configure<ReservationOptions>(builder.Configuration.GetSection("Reservations"));
-builder.Services.AddSingleton<RabbitConnection>();
-builder.Services.AddSingleton<KafkaLog>();
-
-builder.Services.AddScoped<ReservationService>();
-builder.Services.AddScoped<ConnectorsHandler>();
-builder.Services.AddScoped<TokensHandler>();
-builder.Services.AddScoped<ReservationsHandler>();
-
-builder.Services.AddHostedService<OutboxRelay>();
-builder.Services.AddHostedService(sp => new ModuleConsumer<ConnectorsHandler>(
-    sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<RabbitConnection>(),
-    new ConsumerSpec(Topology.ConnectorsQueue, [Topology.ReserveKey, Topology.ReleaseKey], Prefetch: 1),
-    sp.GetRequiredService<ILogger<ModuleConsumer<ConnectorsHandler>>>()));
-builder.Services.AddHostedService(sp => new ModuleConsumer<TokensHandler>(
-    sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<RabbitConnection>(),
-    new ConsumerSpec(Topology.TokensQueue, [Topology.HeldKey], Prefetch: 4),
-    sp.GetRequiredService<ILogger<ModuleConsumer<TokensHandler>>>()));
-builder.Services.AddHostedService(sp => new ModuleConsumer<ReservationsHandler>(
-    sp.GetRequiredService<IServiceScopeFactory>(), sp.GetRequiredService<RabbitConnection>(),
-    new ConsumerSpec(Topology.ReservationsQueue,
-        [Topology.HeldKey, Topology.ShortKey, Topology.IssuedKey, Topology.RejectedKey, Topology.ReleasedKey], Prefetch: 4),
-    sp.GetRequiredService<ILogger<ModuleConsumer<ReservationsHandler>>>()));
+if (config.GetValue("ForwardedHeaders:Enabled", false))
+    builder.Services.Configure<ForwardedHeadersOptions>(o =>
+    {
+        // Behind the nginx container the real client address arrives in X-Forwarded-For. Trusting every proxy is only safe
+        // when the API is reachable through the proxy alone; restrict KnownNetworks to the proxy's network in production.
+        o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+        o.KnownIPNetworks.Clear();
+        o.KnownProxies.Clear();
+    });
 
 var app = builder.Build();
 
-app.UseMiddleware<ExceptionHandler>();
-app.MapControllers();
-app.MapOpenApi();
-app.MapScalarApiReference();
-app.MapGet("/api/health", () => Results.Text("Healthy"));
+if (config.GetValue("ForwardedHeaders:Enabled", false))
+    app.UseForwardedHeaders();
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseMiddleware<SecurityHeadersMiddleware>();
+app.UseMiddleware<ExceptionMiddleware>();
+app.UseStatusCodePages();
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 
-using (var scope = app.Services.CreateScope())
+app.MapControllers();
+app.MapGet("/api/health", () => Results.Text("Healthy")).AllowAnonymous();
+app.MapHealthChecks("/api/health/ready", new HealthCheckOptions { Predicate = r => r.Tags.Contains("ready") }).AllowAnonymous();
+if (config.GetValue("Docs:Public", false))
 {
-    await scope.ServiceProvider.GetRequiredService<ChargingDbContext>().Database.MigrateAsync();
+    app.MapOpenApi().AllowAnonymous();
+    app.MapScalarApiReference().AllowAnonymous();
 }
 
+foreach (var migrator in app.Services.GetServices<IModuleMigrator>().OrderBy(m => m.Order))
+    await migrator.MigrateAsync(app.Services, CancellationToken.None);
+
 app.Run();
+
+public partial class Program;

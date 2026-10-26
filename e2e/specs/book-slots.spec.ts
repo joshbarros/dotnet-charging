@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
+import { ADMIN, adminToken, signIn } from './support';
 
 test('add a connector, book slots, see the token, cancel it', async ({ page }) => {
   const run = Date.now().toString(36).toUpperCase();
   const code = `E2E-${run}`;
   const reference = `DRV-${run}`;
 
-  await page.goto('/');
+  await signIn(page, ADMIN);
   await page.getByLabel('Connector code').fill(code);
   await page.getByLabel('Slots on offer').fill('8');
   await page.getByRole('button', { name: 'Add connector' }).click();
@@ -24,8 +25,12 @@ test('add a connector, book slots, see the token, cancel it', async ({ page }) =
   await expect(remaining).toHaveText('5');
 
   // Nothing is kept in the browser: a fresh load reads the same state from the API.
-  await page.evaluate(() => localStorage.clear());
+  // Nothing sensitive is stored either: the refresh cookie is HttpOnly, so a reload signs back in through it.
+  expect(await page.evaluate(() => JSON.stringify({ ...localStorage, ...sessionStorage }))).toBe(
+    '{}',
+  );
   await page.reload();
+  await expect(page.getByTestId('whoami')).toContainText(ADMIN.email);
   await page.getByRole('button', { name: new RegExp(`^${code}`) }).click();
   const reloaded = page.locator(`tr[data-reference="${reference}"]`);
   await expect(reloaded.getByTestId('status')).toHaveText('Booked');
@@ -36,8 +41,11 @@ test('add a connector, book slots, see the token, cancel it', async ({ page }) =
   await expect(page.getByTestId('selected-remaining')).toHaveText('8');
   // The issued token is not rolled back.
   await expect(reloaded.getByTestId('token')).toHaveText(/CT-[0-9A-F]{12}/);
-  const reservations = await page.request.get(`/api/reservations?connectorCode=${code}`);
+  const headers = { Authorization: `Bearer ${await adminToken(page.request)}` };
+  const reservations = await page.request.get(`/api/reservations?connectorCode=${code}`, {
+    headers,
+  });
   const [reservation] = await reservations.json();
-  const token = await page.request.get(`/api/tokens/${reservation.id}`);
+  const token = await page.request.get(`/api/tokens/${reservation.id}`, { headers });
   expect((await token.json()).status).toBe('Issued');
 });
