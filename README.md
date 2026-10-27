@@ -105,7 +105,7 @@ Needs Node 22 (npm 10), .NET SDK 10.0.401 (`global.json`), Docker (arm64 is fine
 
 ```bash
 npm ci
-dotnet test tests/Charging.UnitTests   # 110 tests, no Docker
+dotnet test tests/Charging.UnitTests   # 111 tests, no Docker
 docker compose up -d --wait db        # the integration tests use Postgres on 5479 (database charging_test)
 docker compose exec db createdb -U charging charging_test   # once
 dotnet test tests/Charging.IntegrationTests
@@ -135,26 +135,29 @@ API=http://127.0.0.1:5219
 login() { curl -s -X POST $API/api/auth/login -H 'content-type: application/json' -d "{\"email\":\"$1\",\"password\":\"$2\"}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessToken"])'; }
 ADMIN="Authorization: Bearer $(login admin@charging.local ChargingAdmin2026)"
 
-curl -s -X POST $API/api/connectors -H "$ADMIN" -H 'content-type: application/json' \
-  -d '{"code":"LIS-CENTRAL-1","name":"Central Station","connectorType":"CCS2","city":"Lisbon","slotsTotal":10}'
-
 curl -s -X POST $API/api/auth/register -H 'content-type: application/json' \
   -d '{"email":"ana@example.com","password":"Passw0rd-Demo1"}'      # 201; its accessToken goes in $ANA below
 ANA="Authorization: Bearer <accessToken>"
 
-curl -s -X POST $API/api/reservations -H "$ANA" -H 'content-type: application/json' \
-  -d '{"connectorCode":"LIS-CENTRAL-1","reference":"DRV-1001","slots":3}'
-# 202, status Requested. Use the returned id:
+curl -s -H "$ADMIN" -X POST $API/api/connectors \
+  -H 'content-type: application/json' \
+  -d '{"code":"LIS-CENTRAL-1","name":"Central Station","connectorType":"CCS2","city":"Lisbon","slotsTotal":12,"priceCents":900}'
 
-curl -s -H "$ANA" $API/api/reservations/<id>             # Booked after a few seconds, with a token number
+curl -s -H "$ANA" -X POST $API/api/reservations \
+  -H 'content-type: application/json' \
+  -d '{"connectorCode":"LIS-CENTRAL-1","reference":"DRV-1001","slots":4}'
+# 202, status Requested, totalCents 3750. Use the returned id:
+
+curl -s -H "$ANA" $API/api/reservations/<id>            # Booked after a few seconds, with a token number
 curl -s -H "$ANA" $API/api/tokens/<id>
 curl -s -H "$ANA" $API/api/connectors/LIS-CENTRAL-1     # slotsLeft 8
-curl -s -H "$ADMIN" $API/api/reservations/<id>/events    # the Kafka log; staff only (a customer gets 403)
+curl -s -H "$ADMIN" $API/api/reservations/<id>/events     # the Kafka log for this reservation
 
-curl -s -X POST -H "$ANA" $API/api/reservations/<id>/cancellation   # slots come back; the token stays
+curl -s -H "$ANA" -X POST $API/api/reservations/<id>/cancellation \
+  -H 'content-type: application/json'                          # slots come back; the token stays
 ```
 
-A reservation is validated at the door: reference required (at most 40 characters), slots from 1 to 8 slots. The poison match is a case-sensitive substring: `DRV-POISON-7` and any longer token containing `POISON` match.
+A reservation is validated at the door: driver reference required (at most 40 characters), 1 to 8 slots. The poison match is a case-sensitive substring: `DRV-POISON-7` and any longer token containing `POISON` match.
 
 ## Develop with Nx
 
@@ -171,7 +174,7 @@ npx nx build web && npx nx build api            # what CI builds
 
 ## What is tested, and where it runs
 
-- **Unit tests** (`tests/Charging.UnitTests`, 110 tests, no Docker, about 3 seconds): the reservation rules and fee, the poison rule including integer overflow, token creation and validation, password and lockout behaviour of the auth service on an in-memory store, owner-or-staff access, the retry policy and topology, message serialization, the outbox `DbContext` conventions, and the HTTP middleware (problem details are `application/problem+json`, security headers, correlation ids).
+- **Unit tests** (`tests/Charging.UnitTests`, 111 tests, no Docker, about 3 seconds): the reservation rules and fee, the poison rule including integer overflow, token creation and validation, password and lockout behaviour of the auth service on an in-memory store, owner-or-staff access, the retry policy and topology, message serialization, the outbox `DbContext` conventions, and the HTTP middleware (problem details are `application/problem+json`, security headers, correlation ids).
 - **Integration tests** (`tests/Charging.IntegrationTests`, 48 tests, real Postgres): the slots race (two tasks, two `DbContext`s, one unit: one `Held`, one `Short`, no hold for the loser) and the check constraint behind it; the saga handlers against the real schema (duplicate delivery claimed once, a release returns the slots once, the poison rejection committed before the dead-letter, cancellation then late final mark); and the **whole HTTP pipeline** through `WebApplicationFactory`: register, login, wrong password, lockout, expired and tampered tokens, refresh rotation, replay revoking the family, two concurrent refreshes (exactly one wins), logout, the same-connectorType header, the auth rate limit, and 401/403/404 for every route and ownership case. The race test was run against a read-then-write version of the hold, where it failed, and against the conditional update, where it passes.
 - **`scripts/smoke.sh`** drives the composed stack: authentication and ownership first (401, 403, 404), then validation, the happy path (fee, token, Kafka log), the last slot with three concurrent reservations, the poison reference (rejected, `tokens.work.dlq` gains one message, slots restored), and a cancellation that lands between the token and the final mark. To make that last window wide enough to hit on purpose, Compose sets `Reservations__FinalMarkDelayMs=1500`; it is a latency knob and defaults to 0.
 - **Playwright** (`e2e/specs`, 11 tests, Chromium): `auth.spec.ts` (anonymous sees only the form, wrong password, password policy, a customer books and sees only their own reservations with no staff controls, sign-out, the session surviving a reload through the cookie while `document.cookie` stays empty); `book-space.spec.ts` (open a connector, book, token, reload, cancel); `ui-flows.spec.ts` (refusal messages, the poison rejection, the loser on a race, the Kafka event log). They run against the composed web port and against the Nx dev servers.
