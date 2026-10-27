@@ -63,7 +63,7 @@ public class ReservationService(ReservationsDbContext db, IConnectorCatalog conn
         return reservation;
     }
 
-    public async Task<List<Reservation>> ListAsync(string? connectorCode, CancellationToken ct)
+    public async Task<(List<Reservation> Items, int Total)> ListAsync(string? connectorCode, int page, int pageSize, CancellationToken ct)
     {
         var query = db.Reservations.AsNoTracking();
         if (!user.IsStaff)
@@ -73,7 +73,9 @@ public class ReservationService(ReservationsDbContext db, IConnectorCatalog conn
         }
         if (!string.IsNullOrWhiteSpace(connectorCode))
             query = query.Where(b => b.ConnectorCode == connectorCode);
-        return await query.OrderByDescending(b => b.CreatedAt).Take(100).ToListAsync(ct);
+        var total = await query.CountAsync(ct);
+        var items = await query.OrderByDescending(b => b.CreatedAt).Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        return (items, total);
     }
 
     /// <summary>Moves Held or Booked to Cancelled and asks Connectors to give the slots back. The token is not touched.</summary>
